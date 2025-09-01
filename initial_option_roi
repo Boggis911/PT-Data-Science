@@ -1,0 +1,270 @@
+# Colab: read params from CSV (wide), fetch OTM calls for ~1M & ~2M, build variables, run metrics, store all_data
+!pip -q install yfinance pandas numpy scipy matplotlib
+
+import io, time, numpy as np, pandas as pd, yfinance as yf, matplotlib.pyplot as plt
+from datetime import datetime, timezone
+from scipy.stats import t, norm
+from IPython.display import display
+
+# ==== INPUT ====
+# Option A: paste your CSV text here (leave empty "" to read from file path)
+CSV_TEXT = """
+
+
+
+Ticker,mu1m,se1m,sigma1m,mu2m,se2m,sigma2m
+AI,-0.0083,0.0563,0.1970,0.0200,0.0970,0.3590
+LYFT,0.0217,0.0360,0.1410,0.0400,0.0547,0.2140
+SEDG,0.0150,0.0838,0.2950,0.0467,0.1257,0.4460
+APLS,0.0210,0.0333,0.1370,0.0357,0.0497,0.2030
+RIG,0.0350,0.0360,0.1630,0.0623,0.0543,0.2430
+
+
+
+
+
+
+"""
+
+# Option B: point to a file (e.g., uploaded to /content/params.csv), used only if CSV_TEXT == ""
+CSV_PATH = "/content/params.csv"
+
+# Controls
+DAYS_1M, DAYS_2M = 35, 65
+N_OTM = 20
+CONSERVATIVE_TRUNCATION = True  # no renorm → lower-bound expectations/ROIs
+
+USE_MID_WHEN_NO_LAST = True
+RUN_METRICS = True              # turn off to only build variables/tables
+SIGMA1M_IS_ANNUALIZED = False   # set True if sigma1m is annualized vol
+SIGMA2M_IS_ANNUALIZED = False   # set True if sigma2m is annualized vol
+
+# Distribution/metrics params
+df_t = 3
+bins_per_sigma = 5
+max_sigma = 4
+EXPECT_DIST = "t"               # 't' or 'normal'
+DAYS_FOR_ANNUALIZED = 30        # used only if converting annualized vol to horizon
+
+# ==== Load CSV ====
+if CSV_TEXT.strip():
+    df_params = pd.read_csv(io.StringIO(CSV_TEXT))
+else:
+    df_params = pd.read_csv(CSV_PATH)
+
+need_cols = {"Ticker","mu1m","se1m","sigma1m","mu2m","se2m","sigma2m"}
+if not need_cols.issubset(set(df_params.columns)):
+    raise ValueError(f"CSV must have columns: {sorted(need_cols)}")
+
+df_params["Ticker"] = df_params["Ticker"].astype(str).str.upper()
+
+# ==== Helpers ====
+def days_to(exp_str):
+    dt = datetime.strptime(exp_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return (dt - datetime.now(timezone.utc)).days
+
+def fetch_spot_and_expiry(ticker, target_days):
+    tk = yf.Ticker(ticker)
+    # spot
+    spot = None
+    try:
+        fi = getattr(tk, "fast_info", {}) or {}
+        spot = fi.get("last_price") or fi.get("last_close")
+    except Exception:
+        pass
+    if spot is None:
+        spot = float(tk.history(period="1d")["Close"].iloc[-1])
+    # nearest positive expiry
+    expiries = [e for e in (tk.options or []) if days_to(e) > 0]
+    if not expiries:
+        return spot, None, None, tk
+    expiry = min(expiries, key=lambda e: abs(days_to(e) - target_days))
+    return spot, expiry, days_to(expiry), tk
+
+def fetch_otm_calls(tk, expiry, spot, n=5):
+    calls = tk.option_chain(expiry).calls.copy()
+    calls = calls[calls["strike"] > spot].sort_values("strike").head(n).copy()
+    if calls.empty:
+        return pd.DataFrame(columns=["strike","lastPrice","volume"])
+    if USE_MID_WHEN_NO_LAST:
+        mid = (calls["bid"].fillna(0) + calls["ask"].fillna(0)) / 2
+        calls["lastPrice"] = calls["lastPrice"].fillna(mid)
+    return calls[["strike","lastPrice","volume"]].reset_index(drop=True)
+
+def run_metrics(options, price_target, sigma, *,
+                df=df_t, bins_per_sigma=bins_per_sigma, max_sigma=max_sigma,
+                vol_is_annualized=False, days_for_annualized=DAYS_FOR_ANNUALIZED,
+                expectation_distribution=EXPECT_DIST, title_suffix=""):
+    # Convert sigma to PRICE sigma if flagged as annualized
+    if vol_is_annualized:
+        sig_price = price_target * sigma * np.sqrt(days_for_annualized / 365.0)
+    else:
+        sig_price = price_target * sigma
+
+    mu = float(price_target)
+    sig = float(sig_price)
+
+    # Grid on PRICE
+    delta = sig / bins_per_sigma
+    centers = np.arange(mu - max_sigma*sig, mu + max_sigma*sig + 1e-12, delta)[:-1] + delta/2
+
+    # PDFs
+    pdf_t = t.pdf((centers - mu) / sig, df) / sig
+    pdf_n = norm.pdf((centers - mu) / sig) / sig
+
+    # Raw (truncated) probabilities inside ±max_sigma
+    probs_t_raw = pdf_t * delta
+    probs_n_raw = pdf_n * delta
+    tail_mass_t = max(0.0, 1.0 - probs_t_raw.sum())
+    tail_mass_n = max(0.0, 1.0 - probs_n_raw.sum())
+
+    use_t = expectation_distribution.lower().startswith('t')
+    probs_raw = probs_t_raw if use_t else probs_n_raw
+    tail_mass = tail_mass_t if use_t else tail_mass_n
+
+    # For expectations/events: raw probs (no renorm) if conservative; else renorm
+    if CONSERVATIVE_TRUNCATION:
+        probs_exp = probs_raw
+    else:
+        probs_exp = probs_raw / probs_raw.sum()
+
+    # For percentiles only: always renorm so quantiles are interpretable
+    probs_pct = (probs_raw / probs_raw.sum()) if probs_raw.sum() > 0 else probs_raw
+    dist_name = f"Student-t (df={df})" if use_t else "Normal"
+
+    # ---- Option metrics ----
+    rows = []
+    S = centers
+    # cumulative for percentiles (reporting only)
+    cprobs_pct = np.cumsum(probs_pct)
+    for K, premium in options:
+        payoff = np.maximum(S - K, 0.0)
+
+        # LOWER-BOUND expectation if CONSERVATIVE_TRUNCATION=True
+        exp_payoff = float(np.dot(payoff, probs_exp))
+        exp_pnl = exp_payoff - premium
+        roi = exp_pnl / premium if premium > 0 else np.nan
+
+        # Event probabilities (also conservative in conservative mode)
+        prob_itm = float(probs_exp[S > K].sum())
+        breakeven = K + premium
+        prob_breakeven = float(probs_exp[S >= breakeven].sum())
+
+        # Percentiles from renormalized probs for readability
+        if probs_pct.sum() > 0:
+            p5  = S[np.searchsorted(cprobs_pct, 0.05)]
+            p50 = S[np.searchsorted(cprobs_pct, 0.50)]
+            p95 = S[np.searchsorted(cprobs_pct, 0.95)]
+        else:
+            p5 = p50 = p95 = np.nan
+
+        rows.append({
+            "Strike": K,
+            "Premium": premium,
+            "Breakeven": breakeven,
+            "Prob ITM": prob_itm,
+            "Prob >= Breakeven": prob_breakeven,
+            "Exp Payoff": exp_payoff,   # conservative if flag True
+            "Exp P&L": exp_pnl,
+            "ROI": roi,                 # conservative if flag True
+            "P5": p5, "P50": p50, "P95": p95
+        })
+
+    tbl = pd.DataFrame(rows).sort_values(by="ROI", ascending=False)
+    pd.options.display.float_format = lambda x: f"{x:,.4f}"
+    # Header + tail mass note
+    hdr = f"{dist_name} {title_suffix}"
+    if CONSERVATIVE_TRUNCATION:
+        print(f"[Conservative] Dropped tail mass beyond ±{max_sigma}σ ≈ {100.0*tail_mass:.2f}% (not reallocated).")
+    print(f"Expectations under: {hdr}")
+
+    display(tbl.style.background_gradient(subset=["ROI"], cmap="RdYlGn").format({
+        "Premium": "{:,.2f}",
+        "Breakeven": "{:,.2f}",
+        "Prob ITM": "{:.2%}",
+        "Prob >= Breakeven": "{:.2%}",
+        "Exp Payoff": "{:,.2f}",
+        "Exp P&L": "{:,.2f}",
+        "ROI": "{:.2f}",
+        "P5": "{:,.2f}", "P50": "{:,.2f}", "P95": "{:,.2f}"
+    }))
+
+    # Plot distributions + strikes (both shown; bars reflect t, dashed normal)
+    plt.figure(figsize=(10,6))
+    plt.bar(centers, probs_t_raw, width=delta*0.9, alpha=0.6, label=f'Student-t (df={df}) raw')
+    plt.plot(centers, probs_n_raw, 'k--', lw=2, label='Normal raw')
+    for k, _ in options:
+        plt.axvline(k, color='red', linestyle='--', lw=2, alpha=0.7)
+    plt.xlabel('Underlying Price at Expiry'); plt.ylabel('Probability per Bin')
+    plt.title(f'Terminal Price Distribution (Mean={price_target:.2f}) {title_suffix}')
+    plt.legend(); plt.grid(True); plt.show()
+
+
+
+
+# ==== Main ====
+all_data = {}
+for r in df_params.itertuples(index=False):
+    ticker = r.Ticker.upper()
+    horizons = [
+        ("1M", DAYS_1M, float(r.mu1m), float(r.sigma1m), SIGMA1M_IS_ANNUALIZED),
+        ("2M", DAYS_2M, float(r.mu2m), float(r.sigma2m), SIGMA2M_IS_ANNUALIZED),
+    ]
+    all_data[ticker] = {}
+
+    for hz_name, target_days, mu_hz, sigma_hz, sigma_is_annual in horizons:
+        # fetch market data
+        try:
+            spot, expiry, D, tk = fetch_spot_and_expiry(ticker, target_days)
+        except Exception as e:
+            print(f"\n=== {ticker} {hz_name} === ERROR: {e}")
+            continue
+        if expiry is None:
+            print(f"\n=== {ticker} {hz_name} === No expiries found.")
+            continue
+
+        calls = fetch_otm_calls(tk, expiry, spot, n=N_OTM)
+        if calls.empty:
+            print(f"\n=== {ticker} {hz_name} === No OTM calls near {expiry}.")
+            continue
+
+        # requested variables
+        options = [(float(s), float(p) if pd.notna(p) else None) for s,p in zip(calls["strike"], calls["lastPrice"])]
+        price_target = float(spot * (1.0 + mu_hz))   # first-order target from mu
+        sigma = float(sigma_hz)                      # horizon sigma (or annualized if flagged)
+
+        print(f"\n=== {ticker} {hz_name} === Spot≈{spot:.2f}  Expiry: {expiry} (≈{D} days)")
+        display(calls[["strike","lastPrice","volume"]])
+
+        # print copy-paste vars
+        print("# Variables:")
+        print("options = [")
+        for s,p in options:
+            prem = f"{p:.2f}" if p is not None else "None"
+            print(f"    ({s:.2f}, {prem}),")
+        print("]")
+        print(f"price_target = {price_target:.2f}")
+        print(f"sigma = {sigma:.4f}")
+
+        if RUN_METRICS:
+            run_metrics(
+                options, price_target, sigma,
+                vol_is_annualized=sigma_is_annual,
+                days_for_annualized=DAYS_FOR_ANNUALIZED,
+                title_suffix=f"— {ticker} {hz_name} ({expiry})"
+            )
+
+        # store
+        all_data[ticker][hz_name] = {
+            "spot": float(spot),
+            "expiry": expiry,
+            "days_to_expiry": int(D),
+            "options": options,
+            "price_target": price_target,
+            "sigma": sigma,
+            "sigma_is_annualized": bool(sigma_is_annual),
+            "table": calls[["strike","lastPrice","volume"]].copy()
+        }
+        time.sleep(0.4)
+
+print("\nStored:", {k:list(v.keys()) for k,v in all_data.items()})
