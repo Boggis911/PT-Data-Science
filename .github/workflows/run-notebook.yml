@@ -1,19 +1,10 @@
-name: run-notebook
-on: [push, workflow_dispatch]
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install -r colab-projects/mark1_scan_&_filter_performance/requirements.txt
-      - run: |
-          python -m nbclient --execute \
-            colab-projects/mark1_scan_&_filter_performance/Mark1_Scan_&_Filter_performance.ipynb \
-            --output colab-projects/mark1_scan_&_filter_performance/Mark1_Scan_&_Filter_performance.out.ipynb
-      - uses: actions/upload-artifact@v4
-        with:
-          name: notebook-output
-          path: colab-projects/mark1_scan_&_filter_performance/Mark1_Scan_&_Filter_performance.out.ipynb
+- uses: actions/checkout@v4
+- uses: actions/setup-python@v5
+  with:
+    python-version: '3.11'
+- run: pip install -r requirements.txt
+- run: python colab-projects/mark1_scan_&_filter_performance/scripts/run_mark1.py
+- uses: actions/upload-artifact@v4
+  with:
+    name: mark1-out
+    path: colab-projects/mark1_scan_&_filter_performance/Mark1_Scan_&_Filter_performance.out.ipynb
