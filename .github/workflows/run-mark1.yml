@@ -1,0 +1,20 @@
+# .github/workflows/run-mark1.yml
+name: run-mark1
+on: [push, workflow_dispatch]
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python colab-projects/mark1_scan_&_filter_performance/your_script.py > run.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mark1-outputs
+          path: |
+            run.log
+            colab-projects/mark1_scan_&_filter_performance/outputs/**
