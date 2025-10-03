@@ -6,3 +6,6 @@ numpy
 yfinance
 requests
 python-dateutil
+matplotlib
+scipy
+statsmodels
