@@ -1,0 +1,14 @@
+Date        Ticker  Sector                  Filter_mu  Filter_mu_se  Filter_sigma  Scanner_mu  Scanner_mu_se  Scanner_sigma
+2025-06-24  AAPL    Information_Technology  10         4             NA            NA          NA             NA
+2025-06-24  ALZN    Health_Care             20         4             NA            NA          NA             NA
+2025-06-24  AVXL    Health_Care             25         6             NA            NA          NA             NA
+2025-06-24  BABA    Consumer_Discretionary  20         4             NA            NA          NA             NA
+2025-06-24  GOOGL   Communication_Services  10         5             NA            NA          NA             NA
+2025-06-24  SOL     Cryptocurrency          30         10            NA            NA          NA             NA
+2025-06-24  TLSA    Health_Care             35         10            NA            NA          NA             NA
+2025-06-24  VKTX    Health_Care             30         10            NA            NA          NA             NA
+2025-06-24  VNET    Information_Technology  15         5             NA            NA          NA             NA
+2025-06-24  SOFI    Financials              20         5             NA            NA          NA             NA
+2025-06-24  SOL_E   Energy                  25         3             NA            NA          NA             NA
+2025-06-24  XRP     Cryptocurrency          35         8             NA            NA          NA             NA
+2025-06-24  MRNA    Health_Care             30         4             NA            NA          NA             NA
