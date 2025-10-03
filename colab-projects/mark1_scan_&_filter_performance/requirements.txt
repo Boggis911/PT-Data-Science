@@ -1,0 +1,8 @@
+nbclient
+nbformat
+ipykernel
+pandas
+numpy
+yfinance
+requests
+python-dateutil
